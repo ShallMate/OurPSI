@@ -1,0 +1,42 @@
+#include "examples/otokvspsi/okvs/aes_crhash.h"
+
+#include <vector>
+
+#include "gtest/gtest.h"
+#include "yacl/crypto/tools/prg.h"
+
+namespace okvs {
+
+class AesCrHashTest : public testing::TestWithParam<std::size_t> {};
+
+TEST_P(AesCrHashTest, Works) {
+  AesCrHash aes_crhash(yacl::MakeUint128(0xabc, 0x89ef));
+
+  const size_t items_size = GetParam();
+
+  std::vector<uint128_t> inputs(items_size);
+  std::vector<uint128_t> outputs(items_size);
+  std::vector<uint128_t> outputs2(items_size);
+  std::vector<uint8_t> outputs3(items_size *
+                                yacl::crypto::SymmetricCrypto::BlockSize());
+
+  yacl::crypto::Prg<uint128_t> prng(yacl::MakeUint128(0x1234, 0x5678));
+  prng.Fill(absl::MakeSpan(inputs));
+
+  aes_crhash.Hash(absl::MakeSpan(inputs), absl::MakeSpan(outputs));
+
+  for (size_t i = 0; i < items_size; ++i) {
+    outputs2[i] = aes_crhash.Hash(inputs[i]);
+  }
+
+  aes_crhash.Hash(absl::MakeSpan((uint8_t *)(&inputs[0]), outputs3.size()),
+                  absl::MakeSpan(outputs3));
+
+  EXPECT_EQ(outputs, outputs2);
+  EXPECT_EQ(std::memcmp(&outputs[0], &outputs3[0], outputs3.size()), 0);
+}
+
+INSTANTIATE_TEST_SUITE_P(Works_Instances, AesCrHashTest,
+                         testing::Values(1, 2, 5, 10, 20));
+
+}  // namespace okvs

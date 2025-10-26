@@ -1,0 +1,42 @@
+load("//bazel:yacl.bzl", "yacl_cc_binary")
+
+package(default_visibility = ["//visibility:public"])
+
+# Declare the `bandokvs_lib` target as a library
+cc_library(
+    name = "bandokvs_lib",
+    srcs = [
+        "band_okvs.cc",
+        "band.cc",
+        "utils.cc",
+    ],
+    hdrs = [
+        "band_okvs.h",
+        "band.h",
+        "utils.h",
+        "uint.h",
+    ],
+    copts = [
+        "-std=c++20",
+        "-march=native",
+        "-maes", "-mpclmul", "-mavx2", "-mavx512f",
+        "-fopenmp", "-O3",
+        "-I/usr/local/include",
+    ],
+    linkstatic = 1,
+    alwayslink = 1,
+    linkopts = [
+        "-L/usr/local/lib",
+        "-lcryptoTools",
+        "-fopenmp",
+        "-O3",
+    ],
+    deps = [":uint"],
+)
+
+# Declare the `uint` target
+cc_library(
+    name = "uint",
+    hdrs = ["uint.h"],
+    deps = [],
+)
