@@ -60,7 +60,7 @@ chmod +x ./ourpsi && ./ourpsi
 
 ### `otokvspsi/`
 
-* **Purpose:** Example directory under YACL that contains demo code for **OurPSI/OurCPSI** and showcases two OKVS options (**RR22** and **BPSY23**). Building produces the `ourpsi` binary used to run PSI/CPSI examples.
+* **Purpose:** Full implemention under YACL that contains demo code for **Our PSI protocols** and showcases two OKVS options (**RR22** and **BPSY23**). Building produces the `ourpsi` binary used to run PSI/CPSI examples.
 * **Binary output (after build):**
   `/opt/yacl/bazel-bin/examples/otokvspsi/ourpsi`
 * **Quick usage example:**
