@@ -3,7 +3,7 @@
 ## Build Image
 
 ```bash
-docker build -t ourpsi:latest .
+docker build -t shallmate/ourpsi:latest .
 ```
 
 ## Run & Example
@@ -11,7 +11,7 @@ docker build -t ourpsi:latest .
 After entering the container:
 
 ```bash
-docker run --rm -it ourpsi:latest
+docker run --rm -it shallmate/ourpsi:latest
 cd /opt/yacl/bazel-bin/examples/otokvspsi/
 ./ourpsi 0 0 20 20
 ```
@@ -28,18 +28,28 @@ The example above runs **PSI** (`arg1=0`) using **RR22** OKVS (`arg2=0`) with se
   * If `arg2=1` (BPSY23): `log2(n)` — log of (symmetric) set size
 * **arg4 (RR22 only)**: `log2(n_r)` — log of receiver size
 
-## More Examples
+## Examples
 
 ```bash
-# PSI + RR22, 2^20 vs 2^20
-./ourpsi 0 0 20 20
-
-# PSI + BPSY23, both sides 2^20 (BPSY23 needs only one log argument)
-./ourpsi 0 1 20
-
-# CPSI + RR22, 2^18 vs 2^22
-./ourpsi 1 0 18 22
+./ourpsi 0 0 24 24
 ```
+![PSI with RR22](./E1.png)
+
+```bash
+./ourpsi 0 1 24 24
+```
+![PSI with BPSY23](./E2.png)
+
+```bash
+./ourpsi 1 0 20 20
+```
+![CPSI with RR22](./E3.png)
+
+```bash
+./ourpsi 1 1 20 20
+```
+![CPSI with RR22](./E4.png)
+
 
 ## Usage Guide
 
@@ -92,8 +102,8 @@ chmod +x ./ourpsi && ./ourpsi
 * **Common commands:**
 
   ```bash
-  docker build -t ourpsi:latest .
-  docker run --rm -it ourpsi:latest
+  docker build -t shallmate/ourpsi:latest .
+  docker run --rm -it shallmate/ourpsi:latest
   ```
 
 ---
