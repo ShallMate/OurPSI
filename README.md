@@ -11,7 +11,7 @@ docker build -t shallmate/ourpsi:latest .
 After entering the container:
 
 ```bash
-docker run --rm -it shallmate/ourpsi:latest
+docker run --rm -it --platform linux/amd64 shallmate/ourpsi:latest /bin/bash
 cd /opt/yacl/bazel-bin/examples/otokvspsi/
 ./ourpsi 0 0 20 20
 ```
