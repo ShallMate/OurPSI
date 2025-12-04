@@ -1,7 +1,7 @@
 # ------------------------------------------------------------
 # Base
 # ------------------------------------------------------------
-FROM ubuntu:20.04
+FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC
 SHELL ["/bin/bash", "-lc"]
@@ -24,7 +24,6 @@ RUN apt-get update && \
         libtool \
         openjdk-11-jdk \
         unzip && \
-    add-apt-repository -y ppa:ubuntu-toolchain-r/test && \
     apt-get update && \
     apt-get install -y gcc-11 g++-11 && \
     update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 60 \

@@ -1,5 +1,8 @@
 # OurPSI Docker Quick Start
 
+This is the implementation of our **NDSS 2026** accepted paper *“Faster Than Ever: A New Lightweight Private Set Intersection and Its Variants”*.
+
+
 ## Build Image
 
 ```bash
