@@ -17,7 +17,8 @@ yacl_cc_binary(
         "psi.h",
         "psi.cc",
         "bokvs.h",
-        "bokvs.cc"
+        "bokvs.cc",
+        "uint.h"
     ],
     deps = [
     "//examples/otokvspsi/okvs:baxos",

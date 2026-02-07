@@ -1,177 +1,457 @@
-
-
 #include "examples/otokvspsi/bokvs.h"
 
+#include <immintrin.h>
+#include <omp.h>
+
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <cstdlib>
+#include <iostream>
 #include <vector>
 
-#include "c/blake3.h"
-#include "examples/otokvspsi/okvs/galois128.h"
+#define OC_ENALBE_AESNI
+#include "cryptoTools/Common/Defines.h"
+#include "cryptoTools/Crypto/AES.h"
+
+#include "examples/otokvspsi/uint.h"
 #include "yacl/base/int128.h"
 #include "yacl/utils/parallel.h"
 
-const uint8_t bitMasks[8] = {
-    0x80,  // 1000 0000
-    0x40,  // 0100 0000
-    0x20,  // 0010 0000
-    0x10,  // 0001 0000
-    0x08,  // 0000 1000
-    0x04,  // 0000 0100
-    0x02,  // 0000 0010
-    0x01,  // 0000 0001
+// Use boost spreadsort for faster integer sorting
+#include <boost/sort/spreadsort/spreadsort.hpp>
+
+// SIMD optimization helpers
+#if defined(__AVX512F__) && defined(__AVX512BW__) && defined(__AVX512DQ__)
+#define USE_AVX512
+#elif defined(__AVX2__)
+#define USE_AVX2
+#endif
+
+// Mask table for AVX-512 optimization (similar to bandokvs)
+#ifdef USE_AVX512
+inline static constexpr __mmask8 mask_table[16] = {
+    0, 3, 12, 15, 48, 51, 60, 63, 192, 195, 204, 207, 240, 243, 252, 255};
+#endif
+
+namespace {
+
+inline oc::block ToOcBlock(uint128_t key) {
+  uint64_t lo = static_cast<uint64_t>(key);
+  uint64_t hi = static_cast<uint64_t>(key >> 64);
+  return _mm_set_epi64x(static_cast<int64_t>(hi),
+                        static_cast<int64_t>(lo));
+}
+
+// Optimized: Generate band word directly using oc::AES like bandokvs
+template <typename BandWordT>
+inline void GenerateBandWord(uint128_t key, int64_t r, int64_t band_length,
+                             BandWordT& out_word, int64_t& band_start) {
+  const int num_blocks = (band_length + 127) / 128;
+  const __uint128_t high_mask =
+      band_length % 128 == 0
+          ? static_cast<__uint128_t>(-1)
+          : (static_cast<__uint128_t>(1) << (band_length % 128)) - 1;
+  const uint32_t divisor = static_cast<uint32_t>(r - band_length + 1);
+
+  static thread_local oc::AES aes(oc::ZeroBlock);
+  oc::block block = aes.hashBlock(ToOcBlock(key));
+  uint32_t p = block.get<uint32_t>(0);
+  band_start = static_cast<int64_t>(p % divisor);
+
+  std::vector<oc::block> expanded_keys(static_cast<size_t>(num_blocks));
+  std::vector<oc::block> blocks(static_cast<size_t>(num_blocks));
+  for (int i = 0; i < num_blocks; ++i) {
+    expanded_keys[static_cast<size_t>(i)] = block ^ oc::block(i);
+  }
+  aes.hashBlocks(expanded_keys, blocks);
+  out_word.set(blocks.data(), num_blocks, high_mask);
+}
+
+template <typename BandWordT, typename BandAndValueT>
+inline void GenerateBandAndValueDirect(uint128_t key, uint128_t value,
+                                       int64_t r, int64_t band_length,
+                                       BandAndValueT& out) {
+  GenerateBandWord(key, r, band_length, out.band_, out.band_start_);
+  out.value_ = value;
+}
+
+// Band structure: compact representation of a fixed-length bit vector
+template <typename BandWordT>
+struct BandT {
+  int64_t band_start_;  // Starting position in OKVS
+  BandWordT band_;
+  int64_t idx_;  // Original index
+
+  BandT() : band_start_(0), idx_(0) {}
+  BandT(int64_t start, const BandWordT& band, int64_t idx)
+      : band_start_(start), band_(band), idx_(idx) {}
+
+  int64_t BandStart() const { return band_start_; }
+  const BandWordT& RawBand() const { return band_; }
+  int64_t Index() const { return idx_; }
 };
 
-inline bool getBit(uint8_t b, int n) { return (b & bitMasks[n]) > 0; }
+// Band with associated value
+template <typename BandWordT>
+struct BandAndValueT {
+  int64_t band_start_;
+  uint128_t value_;
+  BandWordT band_;
 
-inline std::vector<uint8_t> HashToFixedSize(size_t bytesize, uint128_t key) {
-  std::vector<uint8_t> hashResult(bytesize);
+  BandAndValueT() : band_start_(0), value_(0) {}
 
-  std::uint8_t keyBytes[16];
-  std::memcpy(keyBytes, &key, sizeof(key));
+  int64_t BandStart() const { return band_start_; }
+  const BandWordT& RawBand() const { return band_; }
+  uint128_t RawValue() const { return value_; }
+  uint128_t& RawValue() { return value_; }
+};
 
-  // Create a new blake3 hasher
-  blake3_hasher hasher;
-  blake3_hasher_init(&hasher);
+// Helper for sorting bands by band_start
+template <typename BandAndValueT>
+struct BandLessThan {
+  bool operator()(const BandAndValueT& a, const BandAndValueT& b) const {
+    return a.BandStart() < b.BandStart();
+  }
+};
 
-  // Write the key bytes to the hash
-  blake3_hasher_update(&hasher, keyBytes, sizeof(keyBytes));
+template <typename BandAndValueT>
+struct BandRightShift {
+  int operator()(const BandAndValueT& x, unsigned int offset) const {
+    return static_cast<int>(x.BandStart() >> offset);
+  }
+};
 
-  // Generate the hash with the desired size
-  blake3_hasher_finalize(&hasher, hashResult.data(), bytesize);
+template <typename BandWordT>
+using CompactBandT = BandWordT;
 
-  return hashResult;
-}
+// Reduce to row echelon form using band structure (optimized version)
+template <typename BandWordT, typename BandAndValueT>
+bool ReduceToRowEchelon(const BandAndValueT* bands, int64_t n,
+                        CompactBandT<BandWordT>* reduced_matrix,
+                        uint128_t* reduced_values, int64_t m) {
+  const CompactBandT<BandWordT> kZero = CompactBandT<BandWordT>(0);
 
-inline Row Ro(uint128_t key, uint128_t r, size_t n, uint128_t value) {
-  std::vector<uint8_t> row = HashToFixedSize(n, key);
-  int64_t pos = BytesToUint128(row) % r;
-  int64_t bpos = pos / 8;
-  pos = bpos << 3;
-  return {pos, bpos, row, value};
-}
+  for (int64_t i = 0; i < n; ++i) {
+    int64_t offset = bands[i].BandStart();
+    CompactBandT<BandWordT> raw_band = bands[i].RawBand();
+    uint128_t value = bands[i].RawValue();
 
-bool OKVSBK::Encode(std::vector<uint128_t> keys,
-                    std::vector<uint128_t> values) {
-  auto n = this->n_;
-  auto b = this->b_;
-  auto r = this->r_;
-  auto w = this->w_;
-  std::vector<int64_t> piv(n);
-  std::vector<bool> flags(n);
-  std::vector<Row> rows(n);
-  yacl::parallel_for(0, this->n_, [&](int64_t begin, int64_t end) {
-    for (int64_t idx = begin; idx < end; ++idx) {
-      rows[idx] = Ro(keys[idx], r, b, values[idx]);
-    }
-  });
-  std::sort(rows.begin(), rows.end(),
-            [](const Row& a, const Row& b) { return a.pos < b.pos; });
-  for (int64_t i = 0; i < n; i++) {
-    for (int64_t j = 0; j < w; j++) {
-      if (getBit(rows[i].row[static_cast<int>(j / 8)], j % 8)) {
-        piv[i] = j + rows[i].pos;
-        flags[i] = true;
-        for (int64_t k = i + 1; k < n; k++) {
-          if (rows[k].pos > piv[i]) {
-            break;
-          }
-          int64_t posk = piv[i] - rows[k].pos;
-          if (getBit(rows[k].row[static_cast<int>(posk / 8)], posk % 8)) {
-            int64_t shiftnum = rows[k].bpos - rows[i].bpos;
-            for (int64_t bb = 0; bb < b - shiftnum; bb++) {
-              rows[k].row[bb] = rows[k].row[bb] ^ rows[i].row[bb + shiftnum];
-            }
-            rows[k].value = rows[k].value ^ rows[i].value;
-          }
-        }
+    while (offset < m && reduced_matrix[offset] != kZero) {
+      raw_band ^= reduced_matrix[offset];
+      value ^= reduced_values[offset];
+
+      while (offset < m && (raw_band & 1) == 0) {
+        raw_band >>= 1;
+        ++offset;
+      }
+
+      if (offset >= m) {
         break;
       }
     }
-    if (!flags[i]) {
-      throw std::runtime_error("encode failed, " + std::to_string(i));
+
+    if (raw_band == kZero) {
+      continue;
+    }
+
+    if (offset < m) {
+      reduced_matrix[offset] = raw_band;
+      reduced_values[offset] = value;
     }
   }
-  for (int64_t i = n - 1; i >= 0; i--) {
-    uint128_t res = 0;
-    uint128_t pos = rows[i].pos;
-    std::vector<std::uint8_t> row = rows[i].row;
-    for (int64_t j = 0; j < w; j++) {
-      if (getBit(row[j / 8], j % 8)) {
-        int64_t index = pos + j;
-        res = res ^ (this->p_)[index];
+
+  return true;
+}
+
+// AVX-512 optimized XOR based on band pattern (exactly like bandokvs DoXor)
+// Use loop unrolling and direct byte extraction
+#ifdef USE_AVX512
+template <typename BandWordT>
+__m512i DoXorBand(int64_t start_pos, const CompactBandT<BandWordT>& band,
+                  const uint128_t* reduced_values, int64_t band_length) {
+  __m512i res = _mm512_setzero_si512();
+
+  const CompactBandT<BandWordT> kZero = CompactBandT<BandWordT>(0);
+  if (band == kZero) {
+    return res;
+  }
+
+  // Extract bytes directly from band (like bandokvs: *((uint8_t*)(&raw_band) + k))
+  const uint8_t* band_bytes = reinterpret_cast<const uint8_t*>(&band);
+  int64_t num_bytes = (band_length + 7) / 8;
+
+  // Loop unrolling like bandokvs
+  int64_t j = 0;
+  int64_t k = 0;
+  for (; j + 8 <= band_length && k < num_bytes; j += 8, k++) {
+    uint8_t raw_band_mask = band_bytes[k];
+
+    // Process lower 4 bits (first 4 positions)
+    __mmask8 mask = mask_table[raw_band_mask & 0b1111];
+    res = _mm512_xor_epi64(
+        res, _mm512_maskz_loadu_epi64(mask, &reduced_values[start_pos + j]));
+
+    // Process upper 4 bits (next 4 positions)
+    __mmask8 mask2 = mask_table[(raw_band_mask >> 4) & 0b1111];
+    res = _mm512_xor_epi64(
+        res, _mm512_maskz_loadu_epi64(mask2,
+                                      &reduced_values[start_pos + j + 4]));
+  }
+
+  // Handle remaining positions (if any)
+  for (; j < band_length && k < num_bytes; j += 8, k++) {
+    uint8_t raw_band_mask = band_bytes[k];
+    int64_t remaining = std::min(static_cast<int64_t>(8), band_length - j);
+
+    if (remaining > 0) {
+      // Process lower 4 bits
+      if (remaining >= 4) {
+        __mmask8 mask = mask_table[raw_band_mask & 0b1111];
+        res = _mm512_xor_epi64(
+            res, _mm512_maskz_loadu_epi64(mask,
+                                          &reduced_values[start_pos + j]));
+      }
+
+      // Process upper 4 bits
+      if (remaining >= 8) {
+        __mmask8 mask2 = mask_table[(raw_band_mask >> 4) & 0b1111];
+        res = _mm512_xor_epi64(
+            res, _mm512_maskz_loadu_epi64(mask2,
+                                          &reduced_values[start_pos + j + 4]));
       }
     }
-    (this->p_)[piv[i]] = res ^ rows[i].value;
   }
+
+  return res;
+}
+
+// Reduce 512-bit register to 128-bit result (similar to bandokvs DoXor512)
+__m128i DoXor512(__m512i n) {
+  __m128i a = _mm512_extracti64x2_epi64(n, 0);
+  __m128i b = _mm512_extracti64x2_epi64(n, 1);
+  __m128i c = _mm512_extracti64x2_epi64(n, 2);
+  __m128i d = _mm512_extracti64x2_epi64(n, 3);
+  __m128i ab = _mm_xor_si128(a, b);
+  __m128i cd = _mm_xor_si128(c, d);
+  __m128i res = _mm_xor_si128(ab, cd);
+  return res;
+}
+#endif
+
+// Solve the system (similar to bandokvs Solve)
+template <typename BandWordT>
+void Solve(const CompactBandT<BandWordT>* reduced_matrix,
+           uint128_t* reduced_values, int64_t m, int64_t band_length) {
+  const CompactBandT<BandWordT> kZero = CompactBandT<BandWordT>(0);
+  for (int64_t i = m - 1; i >= 0; --i) {
+    if (reduced_matrix[i] == kZero) {
+      continue;
+    }
+
+#ifdef USE_AVX512
+    // Use CompactBand directly, no vector conversion needed
+    __m512i res =
+        DoXorBand(i, reduced_matrix[i], reduced_values, band_length);
+    __m128i res2 = DoXor512(res);
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(&reduced_values[i]), res2);
+#else
+    // Fallback: scalar XOR
+    uint128_t res = 0;
+    const auto& band = reduced_matrix[i];
+    for (int64_t j = 0; j < band_length; j++) {
+      if (band.GetBit(static_cast<int>(j))) {
+        res ^= reduced_values[i + j];
+      }
+    }
+    reduced_values[i] = res;
+#endif
+  }
+}
+
+template <typename BandWordT>
+bool EncodeImpl(const std::vector<uint128_t>& keys,
+                const std::vector<uint128_t>& values, int64_t n, int64_t m,
+                int64_t r, int64_t band_length,
+                std::vector<uint128_t>& p_out) {
+  p_out.resize(m);
+  std::fill(p_out.begin(), p_out.end(), static_cast<uint128_t>(0));
+
+  using BandAndValue = BandAndValueT<BandWordT>;
+  using CompactBand = CompactBandT<BandWordT>;
+  auto* bands =
+      static_cast<BandAndValue*>(std::malloc(n * sizeof(BandAndValue)));
+  yacl::parallel_for(0, n, [&](int64_t begin, int64_t end) {
+    for (int64_t i = begin; i < end; ++i) {
+      GenerateBandAndValueDirect<BandWordT, BandAndValue>(
+          keys[i], values[i], r, band_length, bands[i]);
+    }
+  });
+
+  boost::sort::spreadsort::integer_sort(bands, bands + n,
+                                        BandRightShift<BandAndValue>(),
+                                        BandLessThan<BandAndValue>());
+
+  std::vector<CompactBand> reduced_matrix(m);
+  std::vector<uint128_t> reduced_values(m, 0);
+  if (!ReduceToRowEchelon<BandWordT>(bands, n, reduced_matrix.data(),
+                                     reduced_values.data(), m)) {
+    std::free(bands);
+    return false;
+  }
+
+  Solve<BandWordT>(reduced_matrix.data(), reduced_values.data(), m,
+                   band_length);
+
+  for (int64_t i = 0; i < m; i++) {
+    p_out[i] = reduced_values[i];
+  }
+
+  std::free(bands);
   return true;
+}
+
+template <typename BandWordT>
+void DecodeImpl(const std::vector<uint128_t>& keys,
+                const std::vector<uint128_t>& p,
+                std::vector<uint128_t>& values, int64_t /* n */, int64_t /* r */,
+                int64_t band_length) {
+  // Use p.size() to compute effective r to avoid out-of-bounds access
+  int64_t p_size = static_cast<int64_t>(p.size());
+  int64_t effective_r = p_size - band_length + 1;
+  if (effective_r < 1) {
+    throw std::runtime_error("DecodeImpl: p.size() too small for band_length");
+  }
+  yacl::parallel_for(0, static_cast<int64_t>(keys.size()), 4096, [&](int64_t begin, int64_t end) {
+    for (int64_t i = begin; i < end; ++i) {
+      BandWordT band;
+      int64_t band_start = 0;
+      GenerateBandWord(keys[i], effective_r, band_length, band, band_start);
+
+      uint128_t res = 0;
+      int64_t p_size = static_cast<int64_t>(p.size());
+      // Ensure band_start + band_length doesn't exceed p.size()
+      if (band_start + band_length > p_size) {
+        // Clamp band_start to valid range
+        band_start = std::max(static_cast<int64_t>(0), p_size - band_length);
+      }
+#ifdef USE_AVX512
+      __m512i acc =
+          DoXorBand(band_start, band, p.data(), band_length);
+      __m128i acc128 = DoXor512(acc);
+      _mm_storeu_si128(reinterpret_cast<__m128i*>(&res), acc128);
+#else
+      for (int64_t j = 0; j < band_length; j++) {
+        if (band.GetBit(static_cast<int>(j))) {
+          int64_t idx = band_start + j;
+          if (idx < p_size) {
+            res ^= p[idx];
+          }
+        }
+      }
+#endif
+
+      values[i] = res;
+    }
+  });
+}
+
+}  // namespace
+
+bool OKVSBK::Encode(std::vector<uint128_t> keys,
+                     std::vector<uint128_t> values) {
+  const int num_blocks = static_cast<int>((band_length_ + 127) / 128);
+  switch (num_blocks) {
+    case 1:
+      return EncodeImpl<otokvspsi::uint<1>>(keys, values, n_, m_, r_,
+                                            band_length_, p_);
+    case 2:
+      return EncodeImpl<otokvspsi::uint<2>>(keys, values, n_, m_, r_,
+                                            band_length_, p_);
+    case 3:
+      return EncodeImpl<otokvspsi::uint<3>>(keys, values, n_, m_, r_,
+                                            band_length_, p_);
+    case 4:
+      return EncodeImpl<otokvspsi::uint<4>>(keys, values, n_, m_, r_,
+                                            band_length_, p_);
+    case 5:
+      return EncodeImpl<otokvspsi::uint<5>>(keys, values, n_, m_, r_,
+                                            band_length_, p_);
+    case 6:
+      return EncodeImpl<otokvspsi::uint<6>>(keys, values, n_, m_, r_,
+                                            band_length_, p_);
+    default:
+      return false;
+  }
 }
 
 void OKVSBK::Decode(std::vector<uint128_t> keys,
                     std::vector<uint128_t>& values) {
-  auto b = this->b_;
-  auto r = this->r_;
-  auto w = this->w_;
-  auto p = this->p_;
-  yacl::parallel_for(0, this->n_, [&](int64_t begin, int64_t end) {
-    for (int64_t idx = begin; idx < end; ++idx) {
-      std::vector<uint8_t> row = HashToFixedSize(b, keys[idx]);
-      int64_t pos = BytesToUint128(row) % r;
-      pos = (pos / 8) << 3;
-      for (int64_t j = pos; j < w + pos; j++) {
-        if (getBit(row[(j - pos) / 8], (j - pos) % 8)) {
-          values[idx] = values[idx] ^ p[j];
-        }
-      }
-    }
-  });
+  const int num_blocks = static_cast<int>((band_length_ + 127) / 128);
+  switch (num_blocks) {
+    case 1:
+      return DecodeImpl<otokvspsi::uint<1>>(keys, p_, values, n_, r_,
+                                            band_length_);
+    case 2:
+      return DecodeImpl<otokvspsi::uint<2>>(keys, p_, values, n_, r_,
+                                            band_length_);
+    case 3:
+      return DecodeImpl<otokvspsi::uint<3>>(keys, p_, values, n_, r_,
+                                            band_length_);
+    case 4:
+      return DecodeImpl<otokvspsi::uint<4>>(keys, p_, values, n_, r_,
+                                            band_length_);
+    case 5:
+      return DecodeImpl<otokvspsi::uint<5>>(keys, p_, values, n_, r_,
+                                            band_length_);
+    case 6:
+      return DecodeImpl<otokvspsi::uint<6>>(keys, p_, values, n_, r_,
+                                            band_length_);
+    default:
+      return;
+  }
 }
 
 void OKVSBK::DecodeOtherP(std::vector<uint128_t> keys,
                           std::vector<uint128_t>& values,
-                          std::vector<uint128_t> p) const {
-  auto b = this->b_;
-  auto r = this->r_;
-  auto w = this->w_;
-  yacl::parallel_for(0, this->n_, [&](int64_t begin, int64_t end) {
-    for (int64_t idx = begin; idx < end; ++idx) {
-      std::vector<uint8_t> row = HashToFixedSize(b, keys[idx]);
-      int64_t pos = BytesToUint128(row) % r;
-      pos = (pos / 8) * 8;
-      for (int64_t j = pos; j < w + pos; j++) {
-        if (getBit(row[(j - pos) / 8], (j - pos) % 8)) {
-          values[idx] = values[idx] ^ p[j];
-        }
-      }
-    }
-  });
+                          const std::vector<uint128_t>& p) const {
+  const int num_blocks = static_cast<int>((band_length_ + 127) / 128);
+  switch (num_blocks) {
+    case 1:
+      return DecodeImpl<otokvspsi::uint<1>>(keys, p, values, n_, r_,
+                                            band_length_);
+    case 2:
+      return DecodeImpl<otokvspsi::uint<2>>(keys, p, values, n_, r_,
+                                            band_length_);
+    case 3:
+      return DecodeImpl<otokvspsi::uint<3>>(keys, p, values, n_, r_,
+                                            band_length_);
+    case 4:
+      return DecodeImpl<otokvspsi::uint<4>>(keys, p, values, n_, r_,
+                                            band_length_);
+    case 5:
+      return DecodeImpl<otokvspsi::uint<5>>(keys, p, values, n_, r_,
+                                            band_length_);
+    case 6:
+      return DecodeImpl<otokvspsi::uint<6>>(keys, p, values, n_, r_,
+                                            band_length_);
+    default:
+      return;
+  }
 }
 
 void OKVSBK::DecodeDifflenP(std::vector<uint128_t> keys,
                             std::vector<uint128_t>& values,
-                            std::vector<uint128_t> p) const {
-  auto b = this->b_;
-  auto r = this->r_;
-  auto w = this->w_;
-  yacl::parallel_for(0, keys.size(), [&](int64_t begin, int64_t end) {
-    for (int64_t idx = begin; idx < end; ++idx) {
-      std::vector<uint8_t> row = HashToFixedSize(b, keys[idx]);
-      int64_t pos = BytesToUint128(row) % r;
-      pos = pos & -8;
-      for (int64_t j = pos; j < w + pos; j++) {
-        if (getBit(row[(j - pos) >> 3], (j - pos) & 7)) {
-          values[idx] = values[idx] ^ p[j];
-        }
-      }
-    }
-  });
+                            const std::vector<uint128_t>& p) const {
+  DecodeOtherP(keys, values, p);
 }
 
 void OKVSBK::Mul(okvs::Galois128 delta_gf128) {
-  auto m = this->m_;
-  yacl::parallel_for(0, m, [&](int64_t begin, int64_t end) {
-    for (int64_t idx = begin; idx < end; ++idx) {
-      this->p_[idx] = (delta_gf128 * this->p_[idx]).get<uint128_t>(0);
+  yacl::parallel_for(0, static_cast<int64_t>(p_.size()),
+                     [&](int64_t begin, int64_t end) {
+    for (int64_t i = begin; i < end; ++i) {
+      p_[i] = (delta_gf128 * okvs::Galois128(p_[i])).get<uint128_t>(0);
     }
   });
 }

@@ -30,10 +30,10 @@ std::vector<uint128_t> CreateRangeItems(size_t begin, size_t size) {
   return ret;
 }
 
-void OurPSIRR22() {
+void OurPSIRR22(size_t logns = 24, size_t lognr = 24) {
 
-  const uint64_t ns = 1 << 24;
-  const uint64_t nr = 1 << 24;
+  const uint64_t ns = 1<<logns;
+  const uint64_t nr = 1<<lognr;
   size_t bin_size = nr / 4;
   size_t weight = 3;
   // statistical security parameter
@@ -60,7 +60,7 @@ void OurPSIRR22() {
   std::vector<bool> intersection_mask;
   intersection_mask.assign(items_b.size(), false);
 
-  auto lctxs = yacl::link::test::SetupWorld(2);  // setup network
+  auto lctxs = yacl::link::test::SetupBrpcWorld(2);  // setup network
   lctxs[0]->SetRecvTimeout(120000);
   lctxs[1]->SetRecvTimeout(120000);
 
@@ -136,8 +136,8 @@ void OurPSIRR22SHA2(size_t logns = 24, size_t lognr = 24) {
   intersection_mask.assign(items_b.size(), false);
 
   auto lctxs = yacl::link::test::SetupBrpcWorld(2);  // setup network
-  lctxs[0]->SetRecvTimeout(600000);
-  lctxs[1]->SetRecvTimeout(600000);
+  lctxs[0]->SetRecvTimeout(1200000);
+  lctxs[1]->SetRecvTimeout(1200000);
 
   auto start_time = std::chrono::high_resolution_clock::now();
 
@@ -537,10 +537,10 @@ void OurSemiPSIBPSYSHA2(size_t logn = 24) {
 }
 
 
-void OurPSIBPSY() {
+void OurPSIBPSY(size_t logns = 24, size_t lognr = 24) {
   double epsilon = 0.03;
-  size_t ns = 1 << 20;
-  size_t nr = 1 << 20;
+  size_t ns = 1 << logns;
+  size_t nr = 1 << lognr;
   int m = static_cast<int>((1 + epsilon) * nr);
   cout << "OKVS len: " << m << endl;
   int band_length = 240;
@@ -928,7 +928,7 @@ void OurCPSIBPSY() {
 
 void OurCPSIBPSYSHA2(size_t logn = 24) {
   size_t num = 1 << logn;
-  size_t w = 360;
+  size_t w = 180;
   double e = 1.03;
   size_t cuckoolen = static_cast<uint32_t>(num * 1.27);
   // cout << "Cuckoo len: " << cuckoolen << std::endl;
@@ -998,6 +998,8 @@ void OurCPSIBPSYSHA2(size_t logn = 24) {
 
 enum class Mode { PSI, CPSI };
 enum class OKVS { RR22, BPSY23 };
+enum class Oracle {SHA, AES};
+
 
 static void print_usage(const char* prog) {
   cerr <<
@@ -1017,6 +1019,7 @@ static void print_usage(const char* prog) {
     "  RR22 requires --ns-log and --nr-log; BPSY23 requires --n-log\n";
 }
 
+
 static bool parse_int(const string& s, int& out) {
   try {
     size_t pos = 0;
@@ -1029,6 +1032,7 @@ static bool parse_int(const string& s, int& out) {
     return true;
   } catch (...) { return false; }
 }
+
 
 int main(int argc, char** argv) {
   int      g_ns_log = -1;
@@ -1066,6 +1070,8 @@ int main(int argc, char** argv) {
 
     okvs = (argv[2][0]=='0') ? OKVS::RR22 : OKVS::BPSY23;
     has_okvs = true;
+
+    
 
     if (okvs == OKVS::RR22) {
       if (argc < 5) { print_usage(argv[0]); return 1; }
@@ -1172,3 +1178,5 @@ int main(int argc, char** argv) {
 
   return 0;
 }
+
+
