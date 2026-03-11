@@ -14,7 +14,7 @@ docker build -t shallmate/ourpsi:latest .
 
 * **Circuit-based PSI unaffected.** Our circuit-based PSI claims remain valid: the transmitted OKVS P (in step 6) is still indistinguishable from uniform due to the fresh independent randomization values $r_i$, so the above issue does not apply to that setting.
 
-* **Corrections to the implementations of CPSI, PSI-CA, PSI-SUM, and PJC.** In our previous implementation, we relied on SPU to evaluate the downstream arbitrary circuits. However, since SPU depends on a trusted third party, this was not a fair comparison and led to a significant performance bias. To address this issue, we re-implemented a genuine third-party-free circuit evaluation protocol. The concrete results are illustrated in the example figure below. They can also be reproduced by running our code.
+* **Corrections to the implementations of CPSI, PSI-CA, PSI-SUM, and PJC.** In our previous implementation, we relied on SPU to evaluate the downstream arbitrary circuits. However, since SPU depends on a trusted third party, this was not a fair comparison and led to a significant performance bias. To address this issue, we re-implemented a genuine third-party-free circuit evaluation protocol. At the same time, although the corrected code incurs some performance overhead, it still maintains a substantial advantage over the baseline. The concrete results are illustrated in the example figure below. They can also be reproduced by running our code.
 
 ## Run in Container
 
