@@ -52,6 +52,11 @@ class CuckooHash {
       throw std::invalid_argument("cuckoosize must be positive");
     }
     hash_index_.resize(cuckoolen_, 0);
+    item_index_.assign(cuckoolen_, kEmptyIndex);
+    std::vector<size_t> input_index(inputs.size(), 0);
+    for (size_t i = 0; i < inputs.size(); ++i) {
+      input_index[i] = i;
+    }
     for (size_t i = 0; i < cuckoosize_; ++i) {
       uint8_t old_hash_id = 1;
       size_t j = 0;
@@ -59,13 +64,16 @@ class CuckooHash {
         uint64_t h = GetHash(old_hash_id, inputs[i]) % cuckoolen_;
         uint8_t* hash_id_address = &hash_index_[h];
         uint128_t* key_index_address = &bins_[h];
+        size_t* item_index_address = &item_index_[h];
         if (*hash_id_address == empty_) {
           *hash_id_address = old_hash_id;
           *key_index_address = inputs[i];
+          *item_index_address = input_index[i];
           break;
         } else {
           std::swap(inputs[i], *key_index_address);
           std::swap(old_hash_id, *hash_id_address);
+          std::swap(input_index[i], *item_index_address);
           old_hash_id = old_hash_id % 3 + 1;
         }
       }
@@ -92,10 +100,12 @@ class CuckooHash {
 
   std::vector<uint128_t> bins_;
   std::vector<uint8_t> hash_index_;
+  std::vector<size_t> item_index_;
   size_t cuckoosize_;
   uint32_t cuckoolen_;
 
  private:
   const uint8_t empty_ = 0;
   const size_t maxiter_ = 500;
+  static constexpr size_t kEmptyIndex = static_cast<size_t>(-1);
 };

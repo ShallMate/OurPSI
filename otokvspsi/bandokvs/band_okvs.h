@@ -183,18 +183,23 @@ class BandOkvs {
 
   template <typename V>
   void Decode(const oc::block* keys, const V* okvs, V* out) {
+    return Decode(num_eqns_, keys, okvs, out);
+  }
+
+  template <typename V>
+  void Decode(int query_count, const oc::block* keys, const V* okvs, V* out) {
     if (band_length_ <= 128) {
-      return DecodeHelper<uint<1>, V>(keys, okvs, out);
+      return DecodeHelper<uint<1>, V>(query_count, keys, okvs, out);
     } else if (band_length_ <= 256) {
-      return DecodeHelper<uint<2>, V>(keys, okvs, out);
+      return DecodeHelper<uint<2>, V>(query_count, keys, okvs, out);
     } else if (band_length_ <= 384) {
-      return DecodeHelper<uint<3>, V>(keys, okvs, out);
+      return DecodeHelper<uint<3>, V>(query_count, keys, okvs, out);
     } else if (band_length_ <= 512) {
-      return DecodeHelper<uint<4>, V>(keys, okvs, out);
+      return DecodeHelper<uint<4>, V>(query_count, keys, okvs, out);
     } else if (band_length_ <= 640) {
-      return DecodeHelper<uint<5>, V>(keys, okvs, out);
+      return DecodeHelper<uint<5>, V>(query_count, keys, okvs, out);
     } else if (band_length_ <= 768) {
-      return DecodeHelper<uint<6>, V>(keys, okvs, out);
+      return DecodeHelper<uint<6>, V>(query_count, keys, okvs, out);
     }
     std::cout << "Decode failed! Invalid band length: " << band_length_ << "\n";
   }
@@ -275,8 +280,7 @@ class BandOkvs {
   }
 
   template <typename T, typename V>
-  inline void DecodeHelper(const Band<T>* bands, const V* okvs, V* out) {
-    int n = num_eqns_;
+  inline void DecodeHelper(int n, const Band<T>* bands, const V* okvs, V* out) {
     for (int i = 0; i < n; ++i) {
       int band_start = bands[i].BandStart();
       __m512i res = DoXor(band_start, bands[i].RawBand(), okvs, band_length_);
@@ -287,8 +291,7 @@ class BandOkvs {
   }
 
   template <typename T, typename V>
-  void DecodeHelper(const oc::block* keys, const V* okvs, V* out) {
-    int n = num_eqns_;
+  void DecodeHelper(int n, const oc::block* keys, const V* okvs, V* out) {
     Band<T>* bands = (Band<T>*)malloc(n * sizeof(Band<T>));
 
     GenBands<T>(n, keys, num_vars_, band_length_, bands);
@@ -296,7 +299,7 @@ class BandOkvs {
     boost::sort::spreadsort::integer_sort(bands, bands + n, rightshift(),
                                           lessthan());
 
-    DecodeHelper(bands, okvs, out);
+    DecodeHelper(n, bands, okvs, out);
     // free(bands);
   }
 
