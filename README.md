@@ -5,8 +5,10 @@ This is the implementation of our **NDSS 2026** accepted paper *“Faster Than E
 ## Build Image
 
 ```bash
-docker build -t shallmate/ourpsi:latest .
+docker build --platform linux/amd64 -t shallmate/ourpsi:latest .
 ```
+
+The current `Dockerfile` downloads the `bazel-6.5.0-linux-x86_64` binary and builds `libOTe`/`YACL` for `amd64`, so `linux/amd64` is the safe target platform for both build and run.
 
 ## Note
 
@@ -18,16 +20,39 @@ docker build -t shallmate/ourpsi:latest .
 
 ## Run in Container
 
+The image ends with:
+
+* `WORKDIR /src/yacl/examples/otokvspsi`
+* `CMD ["/src/yacl/bazel-bin/examples/otokvspsi/ourpsi"]`
+
+Run the default command:
+
 ```bash
-docker run --rm -it --platform linux/amd64 shallmate/ourpsi:latest /bin/bash
-cd /opt/yacl/bazel-bin/examples/otokvspsi/
+docker run --rm --platform linux/amd64 shallmate/ourpsi:latest
 ```
 
-The main demo binary is:
+Run a concrete example:
 
 ```bash
-./ourpsi
+docker run --rm --platform linux/amd64 shallmate/ourpsi:latest \
+  /src/yacl/bazel-bin/examples/otokvspsi/ourpsi 0 0 24 24
 ```
+
+Open a shell in the built workspace:
+
+```bash
+docker run --rm -it --platform linux/amd64 \
+  --entrypoint /bin/bash \
+  shallmate/ourpsi:latest
+pwd
+# /src/yacl/examples/otokvspsi
+```
+
+Because the image uses `CMD` instead of `ENTRYPOINT`, extra arguments replace the command. To pass arguments to `ourpsi`, invoke `/src/yacl/bazel-bin/examples/otokvspsi/ourpsi` explicitly as shown above.
+
+The main demo binary is `/src/yacl/bazel-bin/examples/otokvspsi/ourpsi`.
+
+If you prefer the `./ourpsi` shorthand used in the examples below, first change into `/src/yacl/bazel-bin/examples/otokvspsi` inside the container.
 
 ## Supported Modes
 
@@ -173,28 +198,23 @@ Execution time: ...
 Run without arguments to print the built-in usage:
 
 ```bash
-cd /opt/yacl/bazel-bin/examples/otokvspsi/
+cd /src/yacl/bazel-bin/examples/otokvspsi
 ./ourpsi
 ```
 
-If you hit a permission error:
-
-```bash
-chmod +x ./ourpsi
-./ourpsi
-```
+If you opened an interactive shell, the source tree is under `/src/yacl/examples/otokvspsi` and the compiled binary is under `/src/yacl/bazel-bin/examples/otokvspsi`.
 
 ## Folder & File Overview
 
 ### `otokvspsi/`
 
 * **Purpose:** Full implementation under YACL for **PSI**, **CPSI**, **PSI-CA**, **PSI-SUM**, and **PJC**, with two OKVS backends (**RR22** and **BPSY23**).
-* **Binary output (after build):** `/opt/yacl/bazel-bin/examples/otokvspsi/ourpsi`
+* **Copied into the image as:** `/src/yacl/examples/otokvspsi`
+* **Binary output (after build):** `/src/yacl/bazel-bin/examples/otokvspsi/ourpsi`
 * **Quick usage example:**
 
   ```bash
-  cd /opt/yacl/bazel-bin/examples/otokvspsi/
-  ./ourpsi 2 0 20 20
+  /src/yacl/bazel-bin/examples/otokvspsi/ourpsi 2 0 20 20
   ```
 
   This runs **PSI-CA** with **RR22 OKVS**, where the sender size is `2^20` and the receiver size is `2^20`.
@@ -204,19 +224,20 @@ chmod +x ./ourpsi
   * `arg2`: `0` = RR22, `1` = BPSY23
   * RR22: `arg3=log2(n_s)`, `arg4=log2(n_r)`
   * BPSY23: `arg3=log2(n)`
-* **Tip:** If you hit a permission error, run `chmod +x ./ourpsi`
+* **Tip:** In the container, `pwd` starts at `/src/yacl/examples/otokvspsi`
 
 ---
 
 ### `Dockerfile`
 
-* **Purpose:** Reproducible Ubuntu 20.04 build/runtime environment for OurPSI.
-* **What it does (high level):** Installs GCC-11/G++-11, CMake 3.24.2, `cryptoTools` (with Boost/RELIC), Bazel 6.5.0, then builds the `otokvspsi` demo under YACL.
+* **Purpose:** Reproducible Ubuntu 22.04 build/runtime environment for OurPSI on `linux/amd64`.
+* **What it does (high level):** Installs system build dependencies (`build-essential`, `cmake`, OpenJDK 17, etc.), downloads Bazel 6.5.0, builds pinned `libOTe`, clones pinned `YACL`, copies this repository into `yacl/examples/otokvspsi`, then builds `//examples/otokvspsi:ourpsi`.
 * **Common commands:**
 
   ```bash
-  docker build -t shallmate/ourpsi:latest .
-  docker run --rm -it shallmate/ourpsi:latest
+  docker build --platform linux/amd64 -t shallmate/ourpsi:latest .
+  docker run --rm --platform linux/amd64 shallmate/ourpsi:latest
+  docker run --rm -it --platform linux/amd64 --entrypoint /bin/bash shallmate/ourpsi:latest
   ```
 
 ---
