@@ -1,82 +1,94 @@
-# ------------------------------------------------------------
-# Base
-# ------------------------------------------------------------
-FROM ubuntu:22.04
+# syntax=docker/dockerfile:1.7
 
-ENV DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC
-SHELL ["/bin/bash", "-lc"]
+FROM ubuntu:22.04 AS deps
 
+ARG DEBIAN_FRONTEND=noninteractive
+ARG BAZEL_VERSION=6.5.0
+ARG LIBOTE_REPO=https://github.com/osu-crypto/libOTe.git
+ARG LIBOTE_REF=d55867114c78272be7142bd67ebdcb346fec8621
 
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        software-properties-common \
-        build-essential \
-        git \
-        curl \
-        wget \
-        ca-certificates \
-        python3 \
-        python3-distutils \
-        ninja-build \
-        perl \
-        autoconf \
-        automake \
-        libtool \
-        openjdk-11-jdk \
-        unzip && \
-    apt-get update && \
-    apt-get install -y gcc-11 g++-11 && \
-    update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 60 \
-      --slave /usr/bin/g++ g++ /usr/bin/g++-11 && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib64:${LD_LIBRARY_PATH}
 
-# ------------------------------------------------------------
-# CMake 3.24.2
-# ------------------------------------------------------------
-RUN mkdir -p /opt && \
-    wget -q https://github.com/Kitware/CMake/releases/download/v3.24.2/cmake-3.24.2-linux-x86_64.tar.gz -O - \
-    | tar -xz -C /opt && \
-    ln -sfn /opt/cmake-3.24.2-linux-x86_64/bin/cmake /usr/local/bin/cmake && \
-    ln -sfn /opt/cmake-3.24.2-linux-x86_64/bin/ctest /usr/local/bin/ctest && \
-    ln -sfn /opt/cmake-3.24.2-linux-x86_64/bin/cpack /usr/local/bin/cpack
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    autoconf \
+    automake \
+    build-essential \
+    ca-certificates \
+    cmake \
+    curl \
+    file \
+    git \
+    libgflags-dev \
+    libgmp-dev \
+    libgoogle-glog-dev \
+    libssl-dev \
+    libtool \
+    nasm \
+    ninja-build \
+    openjdk-17-jdk-headless \
+    perl \
+    pkg-config \
+    python3 \
+    unzip \
+    zip \
+    && rm -rf /var/lib/apt/lists/*
 
-ENV CC=/usr/bin/gcc-11 CXX=/usr/bin/g++-11
+RUN curl -fsSL -o /usr/local/bin/bazel \
+      "https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-linux-x86_64" \
+    && chmod +x /usr/local/bin/bazel
 
-# ------------------------------------------------------------
-#  cryptoTools（Boost/RELIC）
-# ------------------------------------------------------------
-WORKDIR /opt
-RUN git clone https://github.com/ladnir/cryptoTools.git && \
-    cd cryptoTools && \
-    python3 build.py --setup --boost --relic --install && \
-    python3 build.py --install
+WORKDIR /tmp
 
-# ------------------------------------------------------------
-# Bazel 6.5.0
-# ------------------------------------------------------------
-WORKDIR /opt
-RUN wget -q https://releases.bazel.build/6.5.0/release/bazel-6.5.0-installer-linux-x86_64.sh && \
-    chmod +x bazel-6.5.0-installer-linux-x86_64.sh && \
-    ./bazel-6.5.0-installer-linux-x86_64.sh --prefix=/usr/local && \
-    rm bazel-6.5.0-installer-linux-x86_64.sh
+RUN git clone "${LIBOTE_REPO}" libOTe \
+    && git -C libOTe checkout "${LIBOTE_REF}" \
+    && git -C libOTe submodule update --init --recursive \
+    && cmake -S libOTe -B libOTe/out/build/linux \
+         -DCMAKE_BUILD_TYPE=Release \
+         -DCMAKE_INSTALL_PREFIX=/usr/local \
+         -DNO_SYSTEM_PATH=ON \
+         -DFETCH_AUTO=ON \
+         -DENABLE_CIRCUITS=ON \
+         -DENABLE_MRR=ON \
+         -DENABLE_IKNP=ON \
+         -DENABLE_SOFTSPOKEN_OT=ON \
+         -DENABLE_BITPOLYMUL=ON \
+         -DENABLE_SILENTOT=ON \
+         -DENABLE_SILENT_VOLE=ON \
+         -DENABLE_SSE=ON \
+         -DENABLE_BOOST=ON \
+         -DLIBOTE_STD_VER=20 \
+         -DENABLE_SODIUM=ON \
+         -DSODIUM_MONTGOMERY=ON \
+    && cmake --build libOTe/out/build/linux --parallel "$(nproc)" \
+    && cmake --install libOTe/out/build/linux --prefix /usr/local \
+    && mkdir -p /usr/local/include/securejoin/out/libOTe \
+               /usr/local/include/secure-join/out/libOTe \
+    && cp -a libOTe/thirdparty /usr/local/include/securejoin/out/libOTe/ \
+    && cp -a libOTe/thirdparty /usr/local/include/secure-join/out/libOTe/ \
+    && ldconfig \
+    && rm -rf /tmp/libOTe
 
-# ------------------------------------------------------------
-# YACL
-# ------------------------------------------------------------
-WORKDIR /opt
-RUN git clone https://github.com/ShallMate/yacl.git
-WORKDIR /opt/yacl
-RUN rm -f WORKSPACE BUILD.bazel && \
-    mv WORKSPACE_without_APSI WORKSPACE && \
-    mv BUILD_without_APSI.bazel BUILD.bazel && \
-    mkdir -p examples
+FROM deps AS builder
 
+ARG YACL_REPO=https://github.com/ShallMate/yacl.git
+ARG YACL_REF=f2c6c5ba8d4c475608018a53b75e4b3d62a3112a
 
-COPY otokvspsi/ /opt/yacl/examples/otokvspsi/
+WORKDIR /src
 
-# ------------------------------------------------------------
-RUN bazel --version && \
-    bazel build --experimental_cc_shared_library --linkopt=-ldl //... --cxxopt='-std=c++17'
+RUN git clone "${YACL_REPO}" yacl \
+    && git -C yacl checkout "${YACL_REF}"
 
-CMD ["/bin/bash"]
+COPY . /src/yacl/examples/otokvspsi/
+
+WORKDIR /src/yacl
+
+RUN bazel --batch build \
+    --experimental_cc_shared_library \
+    --cxxopt=-std=c++17 \
+    --host_cxxopt=-std=c++17 \
+    //examples/otokvspsi:ourpsi
+
+WORKDIR /src/yacl/examples/otokvspsi
+
+CMD ["/src/yacl/bazel-bin/examples/otokvspsi/ourpsi"]
 
